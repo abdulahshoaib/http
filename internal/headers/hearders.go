@@ -53,12 +53,25 @@ type Headers struct {
 	headers map[string]string
 }
 
-func (h Headers) Get(name string) string {
-	return h.headers[strings.ToLower(name)]
+func (h Headers) Get(name string) (string, bool) {
+	str, exists := h.headers[strings.ToLower(name)]
+	return str, exists
 }
 
 func (h Headers) Set(name, value string) {
-	h.headers[strings.ToLower(name)] = value
+	name = strings.ToLower(name)
+
+	if prev, exists := h.headers[name]; exists {
+		h.headers[name] = fmt.Sprintf("%s,%s", prev, value)
+	} else {
+		h.headers[name] = value
+	}
+}
+
+func (h Headers) ForEach(cb func(n, v string)) {
+	for n, v := range h.headers {
+		cb(n, v)
+	}
 }
 
 func (h Headers) Parse(data []byte) (int, bool, error) {

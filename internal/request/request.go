@@ -3,7 +3,9 @@ package request
 import (
 	"bytes"
 	"fmt"
+	"http/internal/headers"
 	"io"
+	"strconv"
 )
 
 type RequestLine struct {
@@ -27,28 +29,56 @@ func (r *RequestLine) ValidMethod() bool {
 
 type ParserState string
 
+// ENUM
 const (
-	Init ParserState = "init"
-	Done ParserState = "done"
-	Error ParserState = "error"
+	Init    ParserState = "init"
+	Done    ParserState = "done"
+	Error   ParserState = "error"
+	Headers ParserState = "headers"
+	Body    ParserState = "body"
 )
 
 type Request struct {
 	RequestLine RequestLine
-	state       ParserState
+	State       ParserState
+	Headers     *headers.Headers
+	Body        string
+}
+
+func getInt(headers *headers.Headers, name string, defaultVal int) int {
+	value, exists := headers.Get(name)
+	if !exists {
+		return defaultVal
+	}
+
+	val, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultVal
+	}
+	return val
+}
+
+func (r *Request) hasBody() bool {
+	contentlen := getInt(r.Headers, "content-length", 0)
+	return contentlen > 0
 }
 
 func (r *Request) parse(data []byte) (int, error) {
 	read := 0
 outer:
 	for {
-		switch r.state {
+		currData := data[read:]
+		if len(currData) == 0 {
+			break outer
+		}
+
+		switch r.State {
 		case Error:
 			return 0, ERROR_STATE
 		case Init:
-			rl, n, err := parseRequestLine(data[read:])
+			rl, n, err := parseRequestLine(currData)
 			if err != nil {
-				r.state = Error
+				r.State = Error
 				return 0, err
 			}
 
@@ -59,33 +89,73 @@ outer:
 			r.RequestLine = *rl
 			read += n
 
-			r.state = Done
+			r.State = Headers
+
+		case Headers:
+			n, done, err := r.Headers.Parse(currData)
+			if err != nil {
+				r.State = Error
+				return 0, err
+			}
+
+			if n == 0 {
+				break outer
+			}
+
+			read += n
+
+			if done {
+				if r.hasBody() {
+					r.State = Body
+				} else {
+					r.State = Done
+				}
+			}
+
+		case Body:
+			contentlen := getInt(r.Headers, "content-length", 0)
+			if contentlen == 0 {
+				panic("chuncked encoding not implemented")
+			}
+
+			remaining := min(contentlen-len(r.Body), len(currData))
+			r.Body += string(currData[:remaining])
+			read += remaining
+
+			if len(r.Body) == contentlen {
+				r.State = Done
+			}
 
 		case Done:
 			break outer
+
+		default:
+			panic("Unidentifiable State")
 		}
 	}
 	return read, nil
 }
 
 func (r *Request) parseDone() bool {
-	return r.state == Done
+	return r.State == Done
 }
 
 func (r *Request) parseError() bool {
-	return r.state == Error
+	return r.State == Error
 }
 
 func newRequest() *Request {
 	return &Request{
-		state: Init,
+		State:   Init,
+		Headers: headers.NewHeaders(),
+		Body:    "",
 	}
 }
 
 var MALFORMED_REQ_LINE = fmt.Errorf("malformed request-line")
 var UNSUPPORTED_HTTP_VER = fmt.Errorf("unsupported http version (strictly has to be 1.1)")
 var INCORRECT_METHOD = fmt.Errorf("incorrect request-line method")
-var ERROR_STATE = fmt.Errorf("request in error state")
+var ERROR_STATE = fmt.Errorf("request in error State")
 
 var SEPERATOR = []byte("\r\n")
 
